@@ -105,7 +105,7 @@
   <script>
   /**********************
    * Improved player JS
-   * - fixes: memory leaks, bug fixes
+   * - fixes: reduce memory leaks, add cleanup, small security checks
    * - features: speed 0.5–2.5 in 0.1 steps, keyboard shortcuts
    **********************/
 
@@ -153,7 +153,7 @@
     el.textContent = msg;
     el.style.opacity = '1';
     clearTimeout(_toastTimeout);
-    _toastTimeout = setTimeout(() => { el.style.opacity = '0'; }, ms);
+    _toastTimeout = setTimeout(() => { if (el) el.style.opacity = '0'; }, ms);
   }
 
   // Format time mm:ss / hh:mm:ss if long
@@ -168,22 +168,51 @@
   }
 
   // Initialize speed options dynamically (0.5 -> 2.5 step 0.1)
-  function buildSpeedOptions() {
+  const speedOptionButtons = []; // keep references so we can clean them up on unload
+  // Build speed options dynamically around a center rate (default: current playbackRate)
+  // Build speed options dynamically around a center rate (default: current playbackRate)
+  // Show center and up to N steps in both directions, interleaved: center, +0.1, -0.1, +0.2, -0.2
+  function buildSpeedOptions(center = (video.playbackRate || 1.0), stepsEachDir = 2) {
     speedOptions.innerHTML = '';
-    for (let s = SPEED_MIN; s <= SPEED_MAX + 0.0001; s = Math.round((s + SPEED_STEP)*100)/100) {
+    speedOptionButtons.length = 0;
+
+    // helper to create and append a button for a given speed value (rounded to 0.1)
+    function addButton(val) {
+      const s = Math.round(val * 10) / 10;
+      if (s < SPEED_MIN || s > SPEED_MAX) return null;
+      // avoid duplicates
+      if ([...speedOptions.children].some(c => c.dataset && c.dataset.speed === s.toFixed(1))) return null;
       const btn = document.createElement('button');
       btn.className = 'text-white text-sm p-2 hover:bg-gray-600 w-full text-left';
       btn.type = 'button';
       btn.textContent = `${s.toFixed(1)}x`;
       btn.dataset.speed = s.toFixed(1);
-      btn.addEventListener('click', (ev) => {
-        setPlaybackSpeed(parseFloat(ev.currentTarget.dataset.speed));
-      });
+      btn.onclick = (ev) => {
+        const chosen = parseFloat(ev.currentTarget.dataset.speed);
+        setPlaybackSpeed(chosen);
+        // rebuild centered on the chosen value so menu feels dynamic
+        buildSpeedOptions(chosen, stepsEachDir);
+      };
       speedOptions.appendChild(btn);
+      speedOptionButtons.push(btn);
+      return btn;
+    }
+
+    // Always show the center first
+    addButton(center);
+
+    // Build interleaved +/- sequence up to stepsEachDir
+    for (let k = 1; k <= stepsEachDir; k++) {
+      const up = Math.round((center + k * SPEED_STEP) * 10) / 10;
+      const down = Math.round((center - k * SPEED_STEP) * 10) / 10;
+      // add up then down to create interleaved ordering
+      if (up <= SPEED_MAX) addButton(up);
+      if (down >= SPEED_MIN) addButton(down);
     }
   }
 
-  buildSpeedOptions();
+  // build initial menu around default 1.0 (2 steps each direction)
+  buildSpeedOptions(1.0, 2);
 
   // Playback speed setter (clamps and updates UI)
   function setPlaybackSpeed(rate) {
@@ -236,14 +265,16 @@
     }
   }
 
+  // keep lastVolume in closure rather than on the DOM element
+  let _lastVolume = 1;
   function toggleMute() {
     if (!video.muted) {
-      video.lastVolume = video.volume;
+      _lastVolume = video.volume;
       video.muted = true;
       video.volume = 0;
     } else {
       video.muted = false;
-      video.volume = (video.lastVolume != null ? video.lastVolume : 1);
+      video.volume = (_lastVolume != null ? _lastVolume : 1);
     }
     volumeSlider.value = video.volume;
     updateVolumeIcon();
@@ -276,7 +307,7 @@
     let pos = (clientX - rect.left) / rect.width;
     pos = Math.max(0, Math.min(1, pos));
     const newTime = pos * (isFinite(video.duration) ? video.duration : 0);
-    video.currentTime = newTime;
+    try { video.currentTime = newTime; } catch (err) { /* ignore seeking errors */ }
     progressBar.style.width = `${pos * 100}%`;
     progressThumb.style.left = `${pos * 100}%`;
     timeDisplay.textContent = `${formatTime(video.currentTime)} / ${formatTime(video.duration)}`;
@@ -290,8 +321,18 @@
     }
   }
 
+  function isProbablyUnsafeUrl(url) {
+    if (!url) return true;
+    const trimmed = url.trim().toLowerCase();
+    if (trimmed.startsWith('javascript:')) return true;
+    // block http on https page to avoid mixed-content issues
+    if (window.location.protocol === 'https:' && trimmed.startsWith('http:')) return true;
+    return false;
+  }
+
   function loadExternalUrl(url) {
     if (!url) { toast('Please enter a valid public video URL.'); return; }
+    if (isProbablyUnsafeUrl(url)) { toast('Blocked insecure or invalid URL. Use HTTPS.'); return; }
     video.pause();
     revokePreviousURL();
     // Set & load
@@ -318,13 +359,13 @@
 
   // Prevent duplicate error overlays; use textContent safely
   function handleVideoError() {
-    console.error('Video load failed');
+    console.error('Video load failed', video.error && video.error.code ? video.error.code : '');
     toast('Video Load Failed. Check the file/URL source.', 3500);
     // remove existing overlays
     const existing = videoWrapper.querySelector('.error-overlay');
     if (existing) existing.remove();
     const overlay = document.createElement('div');
-    overlay.className = 'error-overlay';
+    overlay.className = 'error-overlay p-3 text-white bg-black/60';
     overlay.textContent = 'ERROR: Video failed to load. Please check the file or URL.';
     videoWrapper.appendChild(overlay);
   }
@@ -353,7 +394,8 @@
     toast(`Speed: ${newSpeed.toFixed(1)}x`);
   }
 
-  document.addEventListener('keydown', (e) => {
+  // ----- Named handlers so we can remove them on unload -----
+  const onKeyDown = (e) => {
     // ignore typing in inputs
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
 
@@ -389,68 +431,60 @@
         toast('Speed: 1.0x');
         break;
     }
-  });
+  };
 
-  // Event wiring (safe, single handlers)
-  playPauseBtn.addEventListener('click', togglePlayPause);
-  video.addEventListener('play', () => { updatePlayPauseUI(); startProgressLoop(); });
-  video.addEventListener('pause', () => { updatePlayPauseUI(); stopProgressLoop(); });
-  video.addEventListener('ended', () => { updatePlayPauseUI(); stopProgressLoop(); });
-  video.addEventListener('timeupdate', updateProgress); // fallback
-  video.addEventListener('volumechange', updateVolumeIcon);
-  video.addEventListener('error', handleVideoError);
-  localFileInput.addEventListener('change', (ev) => { if (ev.target.files && ev.target.files[0]) loadLocalFile(ev.target.files[0]); });
-  urlInput.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { loadExternalUrl(urlInput.value.trim()); ev.preventDefault(); } });
+  const onPlay = () => { updatePlayPauseUI(); startProgressLoop(); };
+  const onPause = () => { updatePlayPauseUI(); stopProgressLoop(); };
+  const onEnded = () => { updatePlayPauseUI(); stopProgressLoop(); };
+  const onTimeUpdate = () => { updateProgress(); };
+  const onVolumeChange = () => { updateVolumeIcon(); };
+  const onError = () => { handleVideoError(); };
 
-  // progress interactions (mouse + touch)
-  progressBarContainer.addEventListener('mousedown', (e) => { isSeeking = true; scrub(e); progressThumb.style.display = 'block'; });
-  progressBarContainer.addEventListener('touchstart', (e) => { isSeeking = true; scrub(e); progressThumb.style.display = 'block'; }, { passive: true });
+  const onLocalFileChange = (ev) => { if (ev.target.files && ev.target.files[0]) loadLocalFile(ev.target.files[0]); };
+  const onUrlKeyDown = (ev) => { if (ev.key === 'Enter') { loadExternalUrl(urlInput.value.trim()); ev.preventDefault(); } };
 
-  document.addEventListener('mousemove', (e) => { if (isSeeking) scrub(e); });
-  document.addEventListener('touchmove', (e) => { if (isSeeking) scrub(e); }, { passive: true });
+  const onProgressMouseDown = (e) => { isSeeking = true; scrub(e); progressThumb.style.display = 'block'; };
+  const onProgressTouchStart = (e) => { isSeeking = true; scrub(e); progressThumb.style.display = 'block'; };
 
-  document.addEventListener('mouseup', (e) => {
+  const onDocMouseMove = (e) => { if (isSeeking) scrub(e); };
+  const onDocTouchMove = (e) => { if (isSeeking) scrub(e); };
+
+  const onDocMouseUp = (e) => {
     if (isSeeking) {
       scrub(e);
       isSeeking = false;
       progressThumb.style.display = 'none';
     }
-  });
-  document.addEventListener('touchend', (e) => {
+  };
+  const onDocTouchEnd = (e) => {
     if (isSeeking) {
-      // no reliable clientX in touchend; stop seeking
       isSeeking = false;
       progressThumb.style.display = 'none';
     }
-  });
+  };
 
-  // Volume UI
-  volumeSlider.addEventListener('input', () => { video.volume = parseFloat(volumeSlider.value); video.muted = (video.volume === 0); updateVolumeIcon(); });
+  const onVolumeInput = () => { video.volume = parseFloat(volumeSlider.value); video.muted = (video.volume === 0); updateVolumeIcon(); };
 
-  // Speed UI toggle & show/hide
-  speedBtn.addEventListener('click', toggleSpeedOptions);
-  document.addEventListener('click', (e) => {
-    // close speedOptions when clicking outside
-    if (!speedOptions.contains(e.target) && e.target !== speedBtn) speedOptions.classList.add('hidden');
-  });
+  const onSpeedBtnClick = () => { buildSpeedOptions(video.playbackRate || 1.0); toggleSpeedOptions(); };
+  const onDocClick = (e) => { if (!speedOptions.contains(e.target) && e.target !== speedBtn) speedOptions.classList.add('hidden'); };
+  const onQualityChange = (e) => { const val = e.target.value; if (!val || val === 'default') return; const url = availableQualities[val]; if (url) setQuality(url); };
 
-  // Quality select change (if custom qualities are provided)
-  qualitySelect.addEventListener('change', (e) => {
-    const val = e.target.value;
-    if (!val || val === 'default') return;
-    const url = availableQualities[val];
-    if (url) setQuality(url);
-  });
-
-  // Fullscreen icon update on change
-  document.addEventListener('fullscreenchange', () => {
+  function updateFullscreenIcon(isFullscreen) {
     const svg = document.getElementById('fullscreenSvg');
-    if (document.fullscreenElement === playerContainer) {
-      svg.innerHTML = '<path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm-5-8a1 1 0 011-1h4a1 1 0 110 2H6a1 1 0 01-1-1zm6 0a1 1 0 112 0h-4a1 1 0 00-1 1v4a1 1 0 102 0v-3h3a1 1 0 100-2h-3zm-5-1v-3a1 1 0 011-1h3a1 1 0 110 2H8v2a1 1 0 01-2 0z" clip-rule="evenodd"/>';
+    // clear children safely
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('fill-rule', 'evenodd');
+    path.setAttribute('clip-rule', 'evenodd');
+    if (isFullscreen) {
+      path.setAttribute('d','M10 18a8 8 0 100-16 8 8 0 000 16zm-5-8a1 1 0 011-1h4a1 1 0 110 2H6a1 1 0 01-1-1zm6 0a1 1 0 112 0h-4a1 1 0 00-1 1v4a1 1 0 102 0v-3h3a1 1 0 100-2h-3zm-5-1v-3a1 1 0 011-1h3a1 1 0 110 2H8v2a1 1 0 01-2 0z');
     } else {
-      svg.innerHTML = '<path fill-rule="evenodd" d="M3 5a1 1 0 011-1h3a1 1 0 110 2H5v2a1 1 0 11-2 0V5zm8 0a1 1 0 011-1h3a1 1 0 110 2h-2v2a1 1 0 11-2 0V5zm-4 8a1 1 0 011 1v3h2a1 1 0 110 2H4a1 1 0 01-1-1v-3a1 1 0 011-1zm8 1a1 1 0 011-1h3a1 1 0 110 2h-2v2a1 1 0 11-2 0v-3z" clip-rule="evenodd"/>';
+      path.setAttribute('d','M3 5a1 1 0 011-1h3a1 1 0 110 2H5v2a1 1 0 11-2 0V5zm8 0a1 1 0 011-1h3a1 1 0 110 2h-2v2a1 1 0 11-2 0V5zm-4 8a1 1 0 011 1v3h2a1 1 0 110 2H4a1 1 0 01-1-1v-3a1 1 0 011-1zm8 1a1 1 0 011-1h3a1 1 0 110 2h-2v2a1 1 0 11-2 0v-3z');
     }
-  });
+    svg.appendChild(path);
+  }
+
+  const onFullscreenChange = () => { updateFullscreenIcon(document.fullscreenElement === playerContainer); };
 
   // Expose a small helper to populate quality list if desired (call in code or external)
   function setAvailableQualities(obj /* { label: url } */) {
@@ -465,11 +499,96 @@
   }
 
   // cleanup on unload: revoke blob, cancel rAF, remove src to free resources
+  function removeAllListeners() {
+    try {
+      // document-level
+      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('mousemove', onDocMouseMove);
+      document.removeEventListener('touchmove', onDocTouchMove);
+      document.removeEventListener('mouseup', onDocMouseUp);
+      document.removeEventListener('touchend', onDocTouchEnd);
+      document.removeEventListener('click', onDocClick);
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+
+      // element-level
+      playPauseBtn.removeEventListener('click', togglePlayPause);
+      video.removeEventListener('play', onPlay);
+      video.removeEventListener('pause', onPause);
+      video.removeEventListener('ended', onEnded);
+      video.removeEventListener('timeupdate', onTimeUpdate);
+      video.removeEventListener('volumechange', onVolumeChange);
+      video.removeEventListener('error', onError);
+
+      localFileInput.removeEventListener('change', onLocalFileChange);
+      urlInput.removeEventListener('keydown', onUrlKeyDown);
+
+      progressBarContainer.removeEventListener('mousedown', onProgressMouseDown);
+      progressBarContainer.removeEventListener('touchstart', onProgressTouchStart);
+
+      document.removeEventListener('mousemove', onDocMouseMove);
+
+      volumeSlider.removeEventListener('input', onVolumeInput);
+      speedBtn.removeEventListener('click', onSpeedBtnClick);
+      document.removeEventListener('click', onDocClick);
+      qualitySelect.removeEventListener('change', onQualityChange);
+
+      // remove onclick handlers for speed option buttons
+      for (const b of speedOptionButtons) {
+        try { b.onclick = null; } catch (e) { /* ignore */ }
+      }
+      // remove toast if present
+      clearTimeout(_toastTimeout);
+      const t = document.getElementById('playerToast');
+      if (t && t.parentNode) t.parentNode.removeChild(t);
+    } catch (e) { /* ignore */ }
+  }
+
+  // wire up named listeners now
+  playPauseBtn.addEventListener('click', togglePlayPause);
+  video.addEventListener('play', onPlay);
+  video.addEventListener('pause', onPause);
+  video.addEventListener('ended', onEnded);
+  video.addEventListener('timeupdate', onTimeUpdate); // fallback
+  video.addEventListener('volumechange', onVolumeChange);
+  video.addEventListener('error', onError);
+  localFileInput.addEventListener('change', onLocalFileChange);
+  urlInput.addEventListener('keydown', onUrlKeyDown);
+  document.addEventListener('keydown', onKeyDown);
+  fullscreenBtn.addEventListener('click', () => { if (document.fullscreenElement) document.exitFullscreen(); else playerContainer.requestFullscreen(); });
+
+  // progress interactions (mouse + touch)
+  progressBarContainer.addEventListener('mousedown', onProgressMouseDown);
+  progressBarContainer.addEventListener('touchstart', onProgressTouchStart, { passive: true });
+
+  document.addEventListener('mousemove', onDocMouseMove);
+  document.addEventListener('touchmove', onDocTouchMove, { passive: true });
+
+  document.addEventListener('mouseup', onDocMouseUp);
+  document.addEventListener('touchend', onDocTouchEnd);
+
+  // Volume UI
+  volumeSlider.addEventListener('input', onVolumeInput);
+
+  // Speed UI toggle & show/hide
+  speedBtn.addEventListener('click', onSpeedBtnClick);
+  document.addEventListener('click', onDocClick);
+
+  // Quality select change (if custom qualities are provided)
+  qualitySelect.addEventListener('change', onQualityChange);
+
+  // Fullscreen icon update on change
+  document.addEventListener('fullscreenchange', onFullscreenChange);
+
+  // Expose a small helper to populate quality list if desired (call in code or external)
+  // (setAvailableQualities defined earlier)
+
+  // cleanup on unload: revoke blob, cancel rAF, remove src to free resources
   window.addEventListener('beforeunload', () => {
     try {
       revokePreviousURL();
       stopProgressLoop();
       video.src = '';
+      removeAllListeners();
     } catch (e) { /* ignore */ }
   });
 
