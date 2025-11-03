@@ -59,6 +59,7 @@ Supports **local files**, **remote URLs**, **playback controls**, **keyboard sho
 ```bash
 git clone https://github.com/jayeshmanani/Web-Video-Player.git
 cd Web-Video-Player
+```
 
 2. **Open the player**
 
@@ -82,6 +83,7 @@ const availableQualities = {
   "720p": "https://example.com/video_720.mp4",
   "1080p": "https://example.com/video_1080.mp4"
 };
+```
 
 ## ⚡ Browser Compatibility
 
