@@ -101,3 +101,19 @@ Tested on:
 **MIT License** — free to use, modify, and distribute.
 
 [View on GitHub](https://github.com/jayeshmanani/Web-Video-Player)
+
+---
+
+## 🛠️ Contributing Contributions are welcome! To get started:
+
+Fork the repository.
+
+Create a new branch (git checkout -b feature/YourFeature).
+
+Commit your changes (git commit -m 'Add YourFeature').
+
+Push to the branch (git push origin feature/YourFeature).
+
+Open a Pull Request.
+
+Please follow code style conventions: use descriptive variable names, comment complex logic, and test across browsers.
