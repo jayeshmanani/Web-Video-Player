@@ -89,10 +89,10 @@ const availableQualities = {
 
 Tested on:
 
-- Chrome ✅  
-- Firefox ✅  
-- Edge ✅  
-- Safari ✅  
+- Ulaa Browser ✅
+- Brave Browser ✅
+- Chrome ✅
+- Firefox (Only Online videos working, need to fix for local videos) ✅
 
 ---
 
